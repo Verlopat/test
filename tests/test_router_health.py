@@ -201,6 +201,50 @@ class CacheTests(unittest.TestCase):
         third_warnings = record_council_role(path, "runA", "C", third)
         self.assertTrue(any("INDEPENDENCE WARNING" in message for message in third_warnings))
 
+    def test_successful_fallback_becomes_preferred_across_cli_runs(self):
+        def broken(call):
+            raise CandidateError("server overloaded", kind="server")
+        options = [
+            mr.Candidate("Gemini", "top"),
+            mr.Candidate("Groq", "fallback"),
+        ]
+        first = FakeRouter({"top": broken})
+        with patch("router_policy.time.sleep"):
+            self.run_router(first, options)
+        self.assertEqual(self.cache().preferred_model(), ("Groq", "fallback"))
+
+        # Gemini's short cooldown has expired, but Groq remains healthy.
+        # The next command should use Groq directly without another probe.
+        self.clock.advance(31)
+        second = FakeRouter({"top": broken})
+        self.run_router(second, options)
+        self.assertEqual([entry[1] for entry in second.calls], ["fallback"])
+        self.assertFalse(second.calls[0][3])
+        self.assertTrue(any("PREFERRED CACHED Groq/fallback" in n for n in self.notes))
+
+        # After 10 minutes, strict original priority applies again.
+        self.clock.advance(601)
+        third = FakeRouter({"top": broken})
+        with patch("router_policy.time.sleep"):
+            self.run_router(third, options)
+        self.assertEqual(third.calls[0][1], "top")
+        self.assertIsNotNone(self.cache().preferred_model())
+
+    def test_no_sticky_restores_priority_even_with_valid_preference(self):
+        options = [
+            mr.Candidate("Gemini", "top"),
+            mr.Candidate("Groq", "fallback"),
+        ]
+        c = self.cache()
+        c.success("Groq", "fallback", prefer=True)
+        router = FakeRouter()
+        answer, winner, _ = ask_cached(router, "Exact context\nQuestion",
+                                        options, cache=self.cache(), probe=True,
+                                        sticky=False, log=self.notes.append)
+        self.assertEqual(winner.model, "top")
+        self.assertEqual(router.calls[0][1], "top")
+        self.assertTrue(router.calls[0][3])
+
     def test_successful_real_answer_is_cached_even_without_probe(self):
         router = FakeRouter()
         self.run_router(router, [mr.Candidate("Groq", "good")], probe=False)
