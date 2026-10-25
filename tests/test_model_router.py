@@ -122,5 +122,61 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(len(result[2]), 3)
 
 
+    def test_numeric_answer_formats(self):
+        accepted = [
+            '156', '156.0', 'The answer is **156**.',
+            'Answer: 156', '12 * 13 = 156',
+            '12 multiplied by 13 is 156',
+            'Result = 156',
+            r'\boxed{156}',
+            'Calculation:\nAnswer: 156'
+        ]
+        for response in accepted:
+            with self.subTest(response=response):
+                self.assertTrue(mr.matches_expected(response, '156'))
+        for response in ('155', 'Answer: 155', '12 * 13 = 155',
+                         'A random unrelated mention of 156 somewhere.',
+                         '156 is not the answer: it is 155'):
+            with self.subTest(response=response):
+                self.assertFalse(mr.matches_expected(response, '156'))
+        self.assertFalse(mr.matches_expected('Answer: yes', 'no'))
+
+    def test_inline_reasoning_no_longer_concatenates_numbers(self):
+        self.assertEqual(mr.clean_answer('156<think>thinking</think>156'), '156')
+        self.assertEqual(mr.clean_answer('156<think>thinking</think> 156'), '156')
+        self.assertEqual(mr.clean_answer('<think>thinking</think>156'), '156')
+
+    def test_formatted_known_answer_accepted_before_fallback(self):
+        candidates = [mr.Candidate('Groq', 'first'), mr.Candidate('Z.ai', 'second')]
+        response = Response({'choices': [{'message': {'content': 'The answer is **156**.'},
+                                          'finish_reason': 'stop'}]})
+        with patch.dict(os.environ, {'GROQ_API_KEY': 'test', 'ZAI_API_KEY': 'test'}), \
+             patch.object(mr.requests, 'request', return_value=response) as http:
+            answer, winner, attempts = self.router.ask(
+                '12 * 13', candidates, expected='156', log=self.notes.append)
+        self.assertEqual(winner.provider, 'Groq')
+        self.assertEqual(answer, 'The answer is **156**.')
+        self.assertEqual(http.call_count, 1)
+        self.assertEqual(len(attempts), 1)
+
+    def test_rejected_answer_preview_is_opt_in(self):
+        candidates = [mr.Candidate('Groq', 'first')]
+        response = Response({'choices': [{'message': {'content': 'The answer is 155'},
+                                          'finish_reason': 'stop'}]})
+        with patch.dict(os.environ, {'GROQ_API_KEY': 'test'}), \
+             patch.object(mr.requests, 'request', return_value=response):
+            with self.assertRaises(mr.CandidateError):
+                self.router.ask('test', candidates, expected='156', log=self.notes.append)
+        self.assertFalse(any('155' in note for note in self.notes))
+        self.notes.clear()
+        with patch.dict(os.environ, {'GROQ_API_KEY': 'test'}), \
+             patch.object(mr.requests, 'request', return_value=response):
+            with self.assertRaises(mr.CandidateError):
+                self.router.ask('test', candidates, expected='156',
+                                show_rejected=True, log=self.notes.append)
+        self.assertTrue(any('155' in note for note in self.notes))
+
+
+
 if __name__ == '__main__':
     unittest.main()
