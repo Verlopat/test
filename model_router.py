@@ -135,9 +135,20 @@ class Candidate:
 
 
 class Router:
-    def __init__(self, timeout: float = 22.0):
+    def __init__(self, timeout: float = 22.0, probe_timeout: float = 8.0):
         self.timeout = timeout
+        self.probe_timeout = probe_timeout
         self.catalog: dict[str, list[dict]] = {}
+        self._gemini_checked: set[str] = set()
+        self._last_llm7_request: float | None = None
+
+    def _pace_llm7(self):
+        """Respect LLM7's published limit of roughly 1 request/second."""
+        if self._last_llm7_request is not None:
+            elapsed = time.monotonic() - self._last_llm7_request
+            if elapsed < 1.1:
+                time.sleep(1.1 - elapsed)
+        self._last_llm7_request = time.monotonic()
 
     def model_catalog(self, provider: str) -> list[dict]:
         if provider in self.catalog:
@@ -150,6 +161,8 @@ class Router:
         if not endpoint:
             return []
         key = os.getenv(KEY_NAMES[provider], '')
+        if provider == 'LLM7.io':
+            self._pace_llm7()
         response = api_call('GET', endpoint, key=key if provider != 'Ollama Cloud' else None,
                             timeout=min(self.timeout, 15))
         items = response.get('models' if provider == 'Ollama Cloud' else 'data')
@@ -195,18 +208,24 @@ class Router:
         return [Candidate(candidate.provider, model) for model in eligible
                 if (candidate.provider, model) not in used][:limit]
 
-    def generate(self, candidate: Candidate, prompt: str) -> str:
+    def generate(self, candidate: Candidate, prompt: str, *, probe: bool = False) -> str:
+        """A probe is an actual short inference, not just a model lookup."""
         provider, model = candidate.provider, candidate.model
         key = os.getenv(KEY_NAMES[provider], '').strip()
         if not key:
             raise CandidateError('API key not configured')
-        timeout = self.timeout
+        timeout = self.probe_timeout if probe else self.timeout
+        token_limit = 192 if probe else 750
+        if probe:
+            prompt = 'Hi. Reply with OK.'
         if provider == 'Gemini':
             headers = {'x-goog-api-key': key}
             # Validate the candidate model is visible to this key first.
             base = 'https://generativelanguage.googleapis.com/v1beta/models/' + model
-            api_call('GET', base, headers=headers, timeout=min(timeout, 12))
-            generation = {'maxOutputTokens': 700}
+            if model not in self._gemini_checked:
+                api_call('GET', base, headers=headers, timeout=min(timeout, 12))
+                self._gemini_checked.add(model)
+            generation = {'maxOutputTokens': 192 if probe else 700}
             if model == 'gemini-3.8-flash':
                 generation['thinkingConfig'] = {'thinkingLevel': 'LOW'}
             result = api_call('POST', base + ':generateContent', headers=headers,
@@ -252,16 +271,19 @@ class Router:
                 'LLM7.io': 'https://api.llm7.io/v1/chat/completions',
                 'NVIDIA NIM': 'https://integrate.api.nvidia.com/v1/chat/completions',
             }[provider]
+            if provider == 'LLM7.io':
+                self._pace_llm7()
             result = api_call('POST', endpoint, key=key,
                               payload={'model': model, 'messages': [{'role': 'user', 'content': prompt}],
-                                       'max_tokens': 750, 'stream': False}, timeout=timeout)
+                                       'max_tokens': token_limit, 'stream': False}, timeout=timeout)
             raw, _ = extract_openai(result)
         if not isinstance(raw, str):
             raise CandidateError('Invalid final answer format')
         return clean_answer(raw)
 
     def ask(self, prompt: str, ordered: list[Candidate], *, expected: str | None = None,
-            max_attempts: int = 12, log=None, show_rejected: bool = False) -> tuple[str, Candidate, list[tuple[str, str, str]]]:
+            max_attempts: int = 12, log=None, show_rejected: bool = False,
+            probe: bool = False) -> tuple[str, Candidate, list[tuple[str, str, str]]]:
         used: set[tuple[str, str]] = set()
         attempts: list[tuple[str, str, str]] = []
         log = log if log is not None else print
@@ -285,6 +307,21 @@ class Router:
                     raise CandidateError(f'No usable answer within {max_attempts} attempts')
                 used.add(identity)
                 start = time.monotonic()
+                if probe:
+                    try:
+                        self.generate(candidate, 'Hi. Reply with OK.', probe=True)
+                    except CandidateError as e:
+                        reason = 'probe failed: ' + redacted(e)
+                        attempts.append((candidate.provider, candidate.model, reason))
+                        log(f'PROBE FAIL {candidate.provider}/{candidate.model}: {reason} ({time.monotonic() - start:.1f}s)')
+                        continue
+                    except (KeyError, TypeError, ValueError):
+                        reason = 'probe failed: malformed provider response'
+                        attempts.append((candidate.provider, candidate.model, reason))
+                        log(f'PROBE FAIL {candidate.provider}/{candidate.model}: {reason}')
+                        continue
+                    log(f'PROBE OK {candidate.provider}/{candidate.model} ({time.monotonic() - start:.1f}s)')
+                start = time.monotonic()
                 try:
                     response = self.generate(candidate, prompt)
                     if expected is not None and not matches_expected(response, expected):
@@ -295,17 +332,17 @@ class Router:
                 except CandidateError as e:
                     reason = redacted(e)
                     attempts.append((candidate.provider, candidate.model, reason))
-                    log(f'FAIL {candidate.provider}/{candidate.model}: {reason} ({time.monotonic() - start:.1f}s)')
+                    log(f'QUERY FAIL {candidate.provider}/{candidate.model}: {reason} ({time.monotonic() - start:.1f}s)')
                     continue
                 except (KeyError, TypeError, ValueError):
                     # Catch malformed provider replies without hiding programming
                     # errors such as an undefined variable.
                     reason = 'Malformed provider response'
                     attempts.append((candidate.provider, candidate.model, reason))
-                    log(f'FAIL {candidate.provider}/{candidate.model}: {reason}')
+                    log(f'QUERY FAIL {candidate.provider}/{candidate.model}: {reason}')
                     continue
                 attempts.append((candidate.provider, candidate.model, 'OK'))
-                log(f'PASS {candidate.provider}/{candidate.model} ({time.monotonic() - start:.1f}s)')
+                log(f'QUERY PASS {candidate.provider}/{candidate.model} ({time.monotonic() - start:.1f}s)')
                 return response, candidate, attempts
         raise CandidateError('All configured/eligible candidates failed or were skipped')
 
@@ -335,10 +372,14 @@ def main(argv=None) -> int:
     p.add_argument('--config', type=Path, default=ROOT / 'model_priority.json')
     p.add_argument('--timeout', type=float, default=22.0, help='Read timeout per API call (seconds)')
     p.add_argument('--max-attempts', type=int, default=12)
+    p.add_argument('--no-probe', action='store_true',
+                   help='Skip lightweight Hi inference before each real question')
+    p.add_argument('--probe-timeout', type=float, default=8.0,
+                   help='Read timeout for each lightweight probe (seconds)')
     p.add_argument('--list', action='store_true', help='Show configured ranking without sending requests')
     a = p.parse_args(argv)
-    if not (2 <= a.timeout <= 120) or not (1 <= a.max_attempts <= 100):
-        p.error('--timeout must be 2-120 seconds and --max-attempts must be 1-100')
+    if not (2 <= a.timeout <= 120) or not (1 <= a.probe_timeout <= 120) or not (1 <= a.max_attempts <= 100):
+        p.error('--timeout must be 2-120, --probe-timeout 1-120 seconds, and --max-attempts 1-100')
     try:
         candidates = load_config(a.config)
     except (OSError, ValueError, json.JSONDecodeError) as e:
@@ -355,10 +396,10 @@ def main(argv=None) -> int:
     if not prompt or not prompt.strip():
         p.error('Give a question, use --prompt, or pipe a prompt via stdin')
     try:
-        response, winning, attempts = Router(a.timeout).ask(
+        response, winning, attempts = Router(a.timeout, a.probe_timeout).ask(
             prompt.strip() + ('\n\nFor this test, output only the final answer; no explanation.' if a.expect is not None else ''),
             candidates, expected=a.expect, max_attempts=a.max_attempts,
-            show_rejected=a.show_rejected)
+            show_rejected=a.show_rejected, probe=not a.no_probe)
     except CandidateError as e:
         print(f'FAILED: {redacted(e)}', file=sys.stderr)
         return 1
