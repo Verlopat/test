@@ -190,6 +190,17 @@ class CacheTests(unittest.TestCase):
         self.assertEqual([x[1] for x in router.calls], ["big"])
         self.assertIsNone(self.cache().blocked("Gemini", "small"))
 
+    def test_council_cross_provider_base_model_reuse(self):
+        path = Path(self.dir.name) / "roles.json"
+        first = mr.Candidate("Z.ai", "glm-4.7-flash")
+        second = mr.Candidate("Cloudflare", "@cf/zai-org/glm-4.7-flash")
+        third = mr.Candidate("LLM7.io", "glm-4.7-flash")
+        self.assertEqual(record_council_role(path, "runA", "A", first), [])
+        second_warnings = record_council_role(path, "runA", "B", second)
+        self.assertTrue(any("MODEL REUSE" in message for message in second_warnings))
+        third_warnings = record_council_role(path, "runA", "C", third)
+        self.assertTrue(any("INDEPENDENCE WARNING" in message for message in third_warnings))
+
     def test_successful_real_answer_is_cached_even_without_probe(self):
         router = FakeRouter()
         self.run_router(router, [mr.Candidate("Groq", "good")], probe=False)
