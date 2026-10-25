@@ -4,6 +4,56 @@ Local Python router that tries **Gemini main + backups â†’ LLM7 main + backups â
 
 The default configuration has **exact API model IDs** in `model_priority.json` alongside human-readable `display_name` fields. A display name is **never** sent to the API. Mistral's own provider API is excluded (it requires a plan upgrade in this account). LLM7 may host a Codestral model independently.
 
+## Simple fallback router (recommended for terminal testing)
+
+`simple_router.py` is the simpler interactive program: **no health probes, no persistent cache, no saved prompts.** It retries temporary server/timeouts once, then falls back through models within the same provider and onward to the remaining providers. It keeps the exact same user question across attempts. The ranking is in `model_priority.json`.
+
+```bash
+git pull --ff-only
+
+# Normal interactive mode. Stops at the first provider/model that replies.
+python simple_router.py
+
+# Check every provider independently, even if Gemini already works.
+# Keep tests inexpensive: 12-second timeout, no retry, known-answer prompt.
+python simple_router.py --check-providers --timeout 12 --retries 0 --expect 156 "What is 12 multiplied by 13?"
+
+# Check just Cohere (main and backups), without calling Gemini first.
+python simple_router.py --only-provider Cohere --timeout 20 --retries 0 --expect 156 "What is 12 multiplied by 13?"
+
+# Start at LLM7 and continue through all later providers on failure.
+python simple_router.py --start-provider "LLM7.io" "Explain zero-knowledge proofs"
+
+# Start from the normal order, but skip busy Gemini.
+python simple_router.py --skip-provider Gemini "Explain lattice trapdoors"
+```
+
+**The `--check-providers` option actively makes API inference calls**, potentially one or more per provider; it is not the same as testing the provider's public catalog. The output gives a separate PASS / FAILED / SKIPPED status for each provider. Fallback between providers and model backups is exercised where an API actually fails; a successful primary does **not** prove that its backups work. The automatic test suite additionally simulates cross-provider failures with fake responses.
+
+### Cohere free Trial API key
+
+Cohere is now included **after Z.ai and before optional NVIDIA NIM** in the fallback sequence. Its four ranked models are: `command-a-plus-05-2026`, `command-a-03-2025`, `command-r-plus-08-2024`, `command-r7b-12-2024`. These are Cohere Chat v2 IDs, with the adapter calling `https://api.cohere.com/v2/chat`.
+
+Generate a **Trial** key at <https://dashboard.cohere.com/api-keys>, and add it to your existing private local `.env`:
+
+```dotenv
+COHERE_API_KEY=your_trial_key_here
+```
+
+**Trial keys are free and rate-limited; Cohere Production keys are billable.** Only use a confirmed Trial key if you want free usage. Do not paste the key into chat or commit your `.env`. A newly added variable in `.env.example` does **not** automatically populate your existing `.env`.
+
+To check Cohere alone with the original verifier:
+
+```bash
+python verify_free_apis_v2.py --provider Cohere
+```
+
+If a Cohere model is rate-limited and the quota is shared within the provider, the simple router skips the remaining Cohere models for that question rather than exhausting the same quota. Auth errors (including HTTP 498) skip the entire provider. Other failures attempt its next configured model.
+
+**Free usage caveat:** API limits and models can change. All inference calls use the user's own keys, and there is no way for this repository to guarantee that the account has no billing configured.
+
+---
+
 ## Install / update (Arch Linux or other Linux)
 
 From your existing repository directory:
