@@ -10,9 +10,12 @@ import model_router as mr
 
 
 class Response:
-    def __init__(self, data, status=200):
+    def __init__(self, data, status=200, headers=None):
         self.data, self.status_code = data, status
         self.ok = 200 <= status < 300
+        self.headers = headers or {}
+        import json
+        self.text = json.dumps(data)
 
     def json(self):
         return self.data
@@ -38,7 +41,7 @@ class RouterTests(unittest.TestCase):
 
         self.assertEqual(answer, '156')
         self.assertEqual(winner.provider, 'Z.ai')
-        self.assertEqual([a[2] for a in attempts], ['HTTP 503: provider overloaded', 'OK'])
+        self.assertEqual([a[2] for a in attempts], ['HTTP 503: provider/server error', 'OK'])
 
     def test_wrong_known_answer_triggers_next(self):
         choices = [mr.Candidate('Groq', 'a'), mr.Candidate('Z.ai', 'b')]
