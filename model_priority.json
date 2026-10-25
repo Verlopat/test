@@ -1,0 +1,15 @@
+{
+  "note": "EDIT TOP TO BOTTOM: this is your preference order, not a measured model-quality leaderboard. Disabled and unconfigured providers are skipped. Only use free/non-billed account allowances.",
+  "priority": [
+    {"provider": "OpenRouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free"},
+    {"provider": "OpenRouter", "model": "auto-free"},
+    {"provider": "LLM7.io", "model": "minimax-m2.7"},
+    {"provider": "Groq", "model": "openai/gpt-oss-120b"},
+    {"provider": "Ollama Cloud", "model": "gemma4:31b"},
+    {"provider": "Gemini", "model": "gemini-3.8-flash"},
+    {"provider": "Gemini", "model": "gemini-3.5-flash-lite"},
+    {"provider": "Cloudflare", "model": "@cf/zai-org/glm-4.7-flash"},
+    {"provider": "Z.ai", "model": "glm-4.7-flash"},
+    {"provider": "NVIDIA NIM", "model": "nvidia/nemotron-3-super-120b-a12b"}
+  ]
+}
