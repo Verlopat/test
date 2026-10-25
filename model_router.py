@@ -21,6 +21,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
+from answer_validation import matches_expected
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / '.env', override=True)
@@ -106,12 +107,17 @@ def extract_openai(obj: dict) -> tuple[str, str]:
 def clean_answer(raw: str) -> str:
     # Remove only *complete* exposed reasoning blocks. Incomplete blocks are not
     # silently transformed into successful answers.
-    output = re.sub(r'<think\b[^>]*>.*?</think\s*>', '', raw,
+    output = re.sub(r'<think\b[^>]*>.*?</think\s*>', '\n', raw,
                     flags=re.IGNORECASE | re.DOTALL).strip()
     if re.search(r'</?think\b', output, flags=re.IGNORECASE):
         raise CandidateError('Malformed or incomplete reasoning markup')
     if not output:
         raise CandidateError('Empty final answer')
+    # Some models repeat the same answer on both sides of a thinking block.
+    # The newline separator prevents accidental concatenation to 156156.
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) > 1 and all(line == lines[0] for line in lines):
+        return lines[0]
     return output
 
 
@@ -255,7 +261,7 @@ class Router:
         return clean_answer(raw)
 
     def ask(self, prompt: str, ordered: list[Candidate], *, expected: str | None = None,
-            max_attempts: int = 12, log=None) -> tuple[str, Candidate, list[tuple[str, str, str]]]:
+            max_attempts: int = 12, log=None, show_rejected: bool = False) -> tuple[str, Candidate, list[tuple[str, str, str]]]:
         used: set[tuple[str, str]] = set()
         attempts: list[tuple[str, str, str]] = []
         log = log if log is not None else print
@@ -281,8 +287,11 @@ class Router:
                 start = time.monotonic()
                 try:
                     response = self.generate(candidate, prompt)
-                    if expected is not None and response.strip() != expected.strip():
-                        raise CandidateError('Answer did not match --expect')
+                    if expected is not None and not matches_expected(response, expected):
+                        detail = 'Answer did not match --expect'
+                        if show_rejected:
+                            detail += '; preview: ' + redacted(repr(response[:120]))
+                        raise CandidateError(detail)
                 except CandidateError as e:
                     reason = redacted(e)
                     attempts.append((candidate.provider, candidate.model, reason))
@@ -320,7 +329,9 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('prompt', nargs='?', help='Question to ask; if omitted, use --prompt or stdin')
     p.add_argument('--prompt', dest='named_prompt')
-    p.add_argument('--expect', help='For known-answer tests, reject answers not exactly equal to this')
+    p.add_argument('--expect', help='Known-answer check, allowing common numeric formatting')
+    p.add_argument('--show-rejected', action='store_true',
+                   help='Show a short preview of rejected answers (only for non-sensitive prompts)')
     p.add_argument('--config', type=Path, default=ROOT / 'model_priority.json')
     p.add_argument('--timeout', type=float, default=22.0, help='Read timeout per API call (seconds)')
     p.add_argument('--max-attempts', type=int, default=12)
@@ -345,7 +356,9 @@ def main(argv=None) -> int:
         p.error('Give a question, use --prompt, or pipe a prompt via stdin')
     try:
         response, winning, attempts = Router(a.timeout).ask(
-            prompt.strip(), candidates, expected=a.expect, max_attempts=a.max_attempts)
+            prompt.strip() + ('\n\nFor this test, output only the final answer; no explanation.' if a.expect is not None else ''),
+            candidates, expected=a.expect, max_attempts=a.max_attempts,
+            show_rejected=a.show_rejected)
     except CandidateError as e:
         print(f'FAILED: {redacted(e)}', file=sys.stderr)
         return 1
