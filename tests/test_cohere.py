@@ -76,8 +76,7 @@ class CohereTests(unittest.TestCase):
         ])
         self.assertTrue(names.index(('Z.ai', 'glm-4.7-flash')) <
                         names.index(('Cohere', 'command-a-plus-05-2026')))
-        self.assertTrue(names.index(('Cohere', 'command-r7b-12-2024')) <
-                        names.index(('NVIDIA NIM', 'nvidia/nemotron-3-super-120b-a12b')))
+        self.assertFalse(any(provider == 'NVIDIA NIM' for provider, _ in names))
 
 
 if __name__ == '__main__':
