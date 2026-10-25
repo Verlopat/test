@@ -27,7 +27,7 @@ class CandidateError(Exception):
 fake_model_router = types.ModuleType('model_router')
 fake_model_router.KEY_NAMES = {'Gemini': 'GEMINI_API_KEY', 'LLM7.io': 'LLM7_API_KEY',
                                'Groq': 'GROQ_API_KEY', 'OpenRouter': 'OPENROUTER_API_KEY',
-                               'Z.ai': 'ZAI_API_KEY'}
+                               'Z.ai': 'ZAI_API_KEY', 'Cohere': 'COHERE_API_KEY'}
 fake_model_router.Router = object
 fake_model_router.load_config = lambda path: []
 fake_model_router.redacted = str
@@ -71,6 +71,7 @@ class SimpleRouterTests(unittest.TestCase):
             'GEMINI_API_KEY': 'placeholder', 'LLM7_API_KEY': 'placeholder',
             'GROQ_API_KEY': 'placeholder', 'ZAI_API_KEY': 'placeholder',
             'OPENROUTER_API_KEY': 'placeholder',
+            'COHERE_API_KEY': 'placeholder',
         })
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -182,6 +183,87 @@ class SimpleRouterTests(unittest.TestCase):
                                                    'backup': 'works'})
         self.assertEqual([c[1] for c in fake.calls], ['first', 'backup'])
         self.sleep.assert_not_called()
+
+
+    def test_cross_provider_fallback_reaches_cohere(self):
+        models = [
+            Candidate('Gemini', 'gemini-high'), Candidate('Gemini', 'gemini-low'),
+            Candidate('LLM7.io', 'llm7-main'), Candidate('Groq', 'groq-main'),
+            Candidate('OpenRouter', 'openrouter-main'), Candidate('Cohere', 'command-a-plus-05-2026')
+        ]
+        unavailable = CandidateError('model offline', kind='model_unavailable')
+        behaviors = {name: unavailable for name in
+                     ('gemini-high', 'gemini-low', 'llm7-main', 'groq-main', 'openrouter-main')}
+        behaviors['command-a-plus-05-2026'] = '156'
+        (answer, winner), router = self.query(models, behaviors, expected='156')
+        self.assertEqual(answer, '156')
+        self.assertEqual(winner.provider, 'Cohere')
+        self.assertEqual([entry[1] for entry in router.calls],
+                         [model.model for model in models])
+        self.assertTrue(all(entry[2] == router.calls[0][2] for entry in router.calls))
+
+    def test_cohere_backup_when_main_unavailable(self):
+        models = [Candidate('Cohere', 'command-a-plus-05-2026'),
+                  Candidate('Cohere', 'command-a-03-2025')]
+        failure = CandidateError('unavailable', kind='model_unavailable')
+        (answer, winner), router = self.query(
+            models, {'command-a-plus-05-2026': failure, 'command-a-03-2025': '156'},
+            expected='156')
+        self.assertEqual(answer, '156')
+        self.assertEqual(winner.model, 'command-a-03-2025')
+        self.assertEqual(len(router.calls), 2)
+
+    def test_provider_filters_keep_configured_order(self):
+        models = [Candidate('Gemini', 'g1'), Candidate('Gemini', 'g2'),
+                  Candidate('LLM7.io', 'l1'), Candidate('Groq', 'gr'),
+                  Candidate('Cohere', 'c1'), Candidate('Cohere', 'c2')]
+        self.assertEqual(
+            [c.model for c in mod.choose_candidates(models, only_provider='Cohere')],
+            ['c1', 'c2'])
+        self.assertEqual(
+            [c.model for c in mod.choose_candidates(models, start_provider='Groq')],
+            ['gr', 'c1', 'c2'])
+        self.assertEqual(
+            [c.model for c in mod.choose_candidates(models, skip_providers=['Gemini', 'Groq'])],
+            ['l1', 'c1', 'c2'])
+        with self.assertRaises(ValueError):
+            mod.choose_candidates(models, only_provider='Cohere', start_provider='Gemini')
+        self.assertEqual([name for name, _ in mod.provider_batches(models)],
+                         ['Gemini', 'LLM7.io', 'Groq', 'Cohere'])
+
+    def test_check_providers_queries_every_provider_even_after_success(self):
+        import contextlib
+        import io
+        candidates = [Candidate('Gemini', 'g'), Candidate('Gemini', 'backup'),
+                      Candidate('LLM7.io', 'l'), Candidate('Groq', 'gr'),
+                      Candidate('Cohere', 'c')]
+        router = FakeRouter({'g': '156', 'backup': '156', 'l': '156',
+                             'gr': '156', 'c': '156'})
+        output = io.StringIO()
+        with patch.object(mod, 'load_config', return_value=candidates), \
+             patch.object(mod, 'Router', return_value=router), \
+             contextlib.redirect_stdout(output):
+            code = mod.main(['--check-providers', '--expect', '156',
+                             'What', 'is', '12', 'times', '13?'])
+        self.assertEqual(code, 0)
+        self.assertIn('4 passed, 0 failed, 0 skipped', output.getvalue())
+        self.assertEqual([m[1] for m in router.calls], ['g', 'l', 'gr', 'c'])
+        self.assertEqual(router.calls[0][2], 'What is 12 times 13?')
+
+    def test_only_provider_option_tests_cohere_in_isolation(self):
+        import contextlib
+        import io
+        candidates = [Candidate('Gemini', 'g'), Candidate('Cohere', 'a'),
+                      Candidate('Cohere', 'b')]
+        router = FakeRouter({'a': CandidateError('unavailable', kind='model_unavailable'),
+                             'b': '156', 'g': '156'})
+        with patch.object(mod, 'load_config', return_value=candidates), \
+             patch.object(mod, 'Router', return_value=router), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = mod.main(['--only-provider', 'Cohere', '--expect', '156',
+                             'What is 12 times 13?'])
+        self.assertEqual(code, 0)
+        self.assertEqual([call[1] for call in router.calls], ['a', 'b'])
 
 
 if __name__ == '__main__':
