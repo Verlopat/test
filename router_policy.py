@@ -176,6 +176,24 @@ def _private_json_save(path: Path, data: dict):
             temporary.unlink()
 
 
+def underlying_model_identity(candidate) -> str:
+    """Compare base models even when accessed through different providers.
+
+    Explicit model_family metadata wins. In its absence, use the last
+    component of the API model ID, stripping only the :free access suffix.
+    This is a heuristic; custom fine-tunes should provide model_family.
+    """
+    family = getattr(candidate, "model_family", None)
+    if isinstance(family, str) and family.strip():
+        return family.strip().lower()
+    suffix = candidate.model.rsplit("/", 1)[-1]
+    if suffix.endswith(":free"):
+        suffix = suffix[:-5]
+    if suffix.lower() in ("latest", "default", "auto-free", "auto-turbo"):
+        return (candidate.provider + "/" + candidate.model).lower()
+    return suffix.lower()
+
+
 def record_council_role(path: Path, run_id: str, role: str, candidate,
                         *, fallback_used: bool = False) -> list[str]:
     """Record who *actually answered* a role. No prompts, answers or keys saved.
@@ -196,6 +214,7 @@ def record_council_role(path: Path, run_id: str, role: str, candidate,
     selected["roles"][role[:128]] = {
         "provider": candidate.provider,
         "model_id": candidate.model,
+        "base_model": underlying_model_identity(candidate),
         "display_name": getattr(candidate, "display_name", None) or candidate.model,
         "fallback_used": bool(fallback_used),
         "answered_at": time.time(),
@@ -210,7 +229,8 @@ def record_council_role(path: Path, run_id: str, role: str, candidate,
 
     role_groups = {}
     for role_name, result in selected["roles"].items():
-        identifier = (result["provider"], result["model_id"])
+        identifier = result.get("base_model") or (
+            result["provider"] + "/" + result["model_id"])
         role_groups.setdefault(identifier, []).append(role_name)
     alerts = []
     for identifier, same_roles in role_groups.items():
@@ -219,7 +239,7 @@ def record_council_role(path: Path, run_id: str, role: str, candidate,
             prefix = "COUNCIL INDEPENDENCE WARNING" if count >= 3 else "COUNCIL MODEL REUSE"
             alerts.append(
                 f"{prefix}: {count} roles ({', '.join(same_roles)}) used "
-                f"the same model {identifier[0]}/{identifier[1]}; "
-                "these are not independent model perspectives."
+                f"the same underlying model ({identifier}) across their selected APIs; "
+                "do not count these as independent model perspectives."
             )
     return alerts
