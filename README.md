@@ -16,23 +16,43 @@ python -m pip install -r requirements.txt
 
 On first setup, copy `.env.example` to .env, enter your keys **locally**, then `chmod 600 .env`. Never commit or paste your keys.
 
+## Provider-first handshake and fallback
+
+This is now a **two-step inference process per candidate**, enabled by default:
+
+1. Send a short `Hi. Reply with OK.` prompt to Gemini 3.8 Flash.
+2. If the probe fails, try Gemini 3.6 Flash, then Gemini 3.5 Flash-Lite.
+3. If a probe succeeds, send the **real prompt** to that same model.
+4. If the real prompt fails, still move to the next model.
+5. After Gemini's candidates, try LLM7's MiniMax-M2.7, Nemotron Nano 30B, GPT-OSS 20B, and Codestral.
+6. Only after those move to Groq, OpenRouter, Ollama Cloud, Cloudflare, Z.ai and optional NVIDIA NIM.
+
+The order is in `model_priority.json`; these are preferences, not a proven quality ranking. Each LLM7 candidate must still appear as an eligible **Turbo** model in the live catalog. Mistral's **own provider API** remains excluded; Codestral via the independent LLM7 service is a different endpoint.
+
+**A successful Hi response does not guarantee the real prompt will succeed.** The probe is an actual paid-or-free-allowance inference request, **not** a permanent connection or authorization reservation. Every model attempted may consume two inference requests, and the router sends the real question only after its probe succeeds. Free quotas and limits are enforced by the providers; the router does not guarantee free billing.
+
+The LLM7 connector spaces requests to respect the documented roughly one-request-per-second free-tier rate limit. If probes are consuming too much quota or slowing down the workflow, use `--no-probe`. The router still performs fallback for failed real queries without probes.
+
 ## Run the ranked fallback router
 
 ```bash
 # Show the ranking and which providers have keys without making API calls
 python model_router.py --list
 
-# Try highest ranked first, automatically move down on failure
+# Default: send a short Hi probe, then the real question to a responsive model
 python model_router.py "Explain what a zero-knowledge proof is"
+
+# Skip the extra Hi requests if you need fewer API calls
+python model_router.py --no-probe "Explain a zero-knowledge proof"
 
 # Test accuracy for a prompt with a known answer
 python model_router.py --expect 156 "What is 12 multiplied by 13?"
 
 # Avoid waiting long for an overloaded model
-python model_router.py --timeout 12 --max-attempts 8 "Explain Merkle trees"
+python model_router.py --probe-timeout 7 --timeout 12 --max-attempts 8 "Explain Merkle trees"
 ```
 
-The **first eligible model with a usable response wins**, and later models are not called. Failures including 401/403, 429, 5xx, timeouts, missing keys, nonexistent models, empty output, malformed thinking tags and truncated responses fall through to the next candidate. The program prints FAIL/SKIP/PASS events, the winning provider and its answer. If all configured options fail, it exits with an error rather than inventing an answer.
+The **first eligible model with a usable response to the real question wins**, and later models are not called. Messages identify each `PROBE OK`, `PROBE FAIL`, `QUERY PASS` and `QUERY FAIL`. Failures including 401/403, 429, 5xx, timeouts, missing keys, nonexistent models, empty output, malformed thinking tags and truncated responses fall through to the next candidate. The program prints FAIL/SKIP/PASS events, the winning provider and its answer. If all configured options fail, it exits with an error rather than inventing an answer.
 
 **Critical distinction:** Usable does not mean factually correct. The router cannot automatically prove answer quality for open-ended prompts. For exact-answer tests, `--expect` verifies the output and falls back if wrong.
 
@@ -50,7 +70,7 @@ Edit `model_priority.json`. Entries are attempted **top-to-bottom**:
 
 If Gemini 3.8 Flash fails, try Gemini 3.5 Flash-Lite. If that fails, try Groq. Change the order whenever you want; there is **no scientifically verified universal model ranking**.
 
-The included ranking places the previously working models near the top so the router is usable even while Gemini remains busy. `auto-free` under OpenRouter checks the live model catalog and tries up to three additional models with **both input and output listed at zero price**. `auto-turbo` for LLM7.io is available if added to the configuration, and checks its Turbo/non-usage-based catalog markers. These automated catalog orders are **not quality rankings**. Candidate IDs are attempted only once.
+The included ranking deliberately begins with Gemini 3.8/3.6/3.5 Flash-Lite, then LLM7 MiniMax and its backups, as requested. Consequently, the default run can be slower when Gemini is overloaded. `--probe-timeout` controls the time spent on Hi probes. `auto-free` under OpenRouter checks the live model catalog and tries up to three additional models with **both input and output listed at zero price**. `auto-turbo` for LLM7.io is available if added to the configuration, and checks its Turbo/non-usage-based catalog markers. These automated catalog orders are **not quality rankings**. Candidate IDs are attempted only once.
 
 Some services offer a free quota but also paid plans. This code cannot inspect billing settings or guarantee charges cannot occur. **Confirm your own free/non-billed plan and quota** for every configured provider before making requests. A free API key is not automatically a free API inference plan.
 
