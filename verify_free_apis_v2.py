@@ -6,8 +6,8 @@ Usage:
   python verify_free_apis_v2.py --provider Gemini --provider Z.ai
   python verify_free_apis_v2.py --test-allowance
 
-For Mistral/Ollama, --test-allowance sends one inference request only if you have
-personally confirmed the relevant account is on its free, non-billed plan.
+For Ollama, --test-allowance sends one inference request only if you have
+personally confirmed the account is on its free, non-billed plan.
 """
 import argparse
 import csv
@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / '.env', override=True)
 PROMPT = 'What is 12 multiplied by 13? Answer with only the number.'
 KEYS = ['GEMINI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY',
-        'MISTRAL_API_KEY', 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID',
+        'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID',
         'ZAI_API_KEY', 'LLM7_API_KEY', 'OLLAMA_API_KEY']
 SECRETS = [os.getenv(key, '').strip() for key in KEYS]
 
@@ -190,6 +190,12 @@ def llm7(args):
     return evaluate(model, raw)
 
 
+def nvidia(args):
+    model = 'nvidia/nemotron-3-super-120b-a12b'
+    return evaluate(model, chat('https://integrate.api.nvidia.com/v1/chat/completions',
+                                os.environ['NVIDIA_API_KEY'], model, timeout=(8, 45)))
+
+
 def ollama(args):
     key = os.environ['OLLAMA_API_KEY']
     # This GET is public. It does not authenticate the API key.
@@ -211,11 +217,11 @@ PROVIDERS = [
     ('Gemini', ['GEMINI_API_KEY'], gemini),
     ('Groq', ['GROQ_API_KEY'], groq),
     ('OpenRouter', ['OPENROUTER_API_KEY'], openrouter),
-    ('Mistral', ['MISTRAL_API_KEY'], mistral),
     ('Cloudflare', ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'], cloudflare),
     ('Z.ai', ['ZAI_API_KEY'], zai),
     ('LLM7.io', ['LLM7_API_KEY'], llm7),
     ('Ollama Cloud', ['OLLAMA_API_KEY'], ollama),
+    ('NVIDIA NIM', ['NVIDIA_API_KEY'], nvidia),
 ]
 
 
@@ -224,7 +230,7 @@ def main():
     p.add_argument('--provider', action='append', choices=[row[0] for row in PROVIDERS],
                    help='Repeat this option to test selected providers; default: all')
     p.add_argument('--test-allowance', action='store_true',
-                   help='Also send one prompt through Mistral/Ollama; use only after confirming Free mode for both')
+                   help='Also send a prompt through Ollama Cloud; use only on confirmed Free plan')
     args = p.parse_args()
     chosen = set(args.provider or [p[0] for p in PROVIDERS])
     print('API verification v2 — credentials are never printed.\n')
