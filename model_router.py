@@ -282,7 +282,7 @@ class Router:
         return clean_answer(raw)
 
     def ask(self, prompt: str, ordered: list[Candidate], *, expected: str | None = None,
-            max_attempts: int = 12, log=None, show_rejected: bool = False,
+            max_attempts: int = 20, log=None, show_rejected: bool = False,
             probe: bool = False) -> tuple[str, Candidate, list[tuple[str, str, str]]]:
         used: set[tuple[str, str]] = set()
         attempts: list[tuple[str, str, str]] = []
@@ -371,7 +371,7 @@ def main(argv=None) -> int:
                    help='Show a short preview of rejected answers (only for non-sensitive prompts)')
     p.add_argument('--config', type=Path, default=ROOT / 'model_priority.json')
     p.add_argument('--timeout', type=float, default=22.0, help='Read timeout per API call (seconds)')
-    p.add_argument('--max-attempts', type=int, default=12)
+    p.add_argument('--max-attempts', type=int, default=20)
     p.add_argument('--no-probe', action='store_true',
                    help='Skip lightweight Hi inference before each real question')
     p.add_argument('--probe-timeout', type=float, default=8.0,
