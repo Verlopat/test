@@ -22,6 +22,7 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 from answer_validation import matches_expected
+from router_errors import CandidateError, from_http
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / '.env', override=True)
@@ -43,10 +44,6 @@ KEY_NAMES = {
 }
 
 
-class CandidateError(Exception):
-    """Safe descriptive error that triggers fallback."""
-
-
 def redacted(s: Any) -> str:
     message = str(s)
     for secret in SECRETS:
@@ -65,25 +62,22 @@ def api_call(method: str, url: str, *, key: str | None = None,
         resp = requests.request(method, url, json=payload, headers=hs,
                                 timeout=(5, timeout))
     except requests.exceptions.Timeout:
-        raise CandidateError('Timed out') from None
+        raise CandidateError('Timed out', kind='timeout') from None
     except requests.RequestException:
-        # Do not include exception text, URLs or credential-bearing headers.
-        raise CandidateError('Connection failed') from None
+        # Never include request URLs, exception text or authorization headers.
+        raise CandidateError('Connection failed', kind='connection') from None
     if not resp.ok:
-        detail = {401: 'authentication failed', 403: 'access denied',
-                  404: 'model/endpoint unavailable', 408: 'request timeout',
-                  429: 'rate limit or quota exceeded',
-                  500: 'provider internal error', 502: 'provider gateway error',
-                  503: 'provider overloaded', 504: 'provider timeout'}
-        raise CandidateError(f'HTTP {resp.status_code}: {detail.get(resp.status_code, "request rejected")}')
+        raise from_http(resp.status_code, resp.text,
+                        resp.headers.get('Retry-After'))
     try:
         parsed = resp.json()
     except ValueError:
-        raise CandidateError('Non-JSON response') from None
+        raise CandidateError('Non-JSON response', kind='invalid_response') from None
     if not isinstance(parsed, dict):
-        raise CandidateError('Unexpected API response structure')
+        raise CandidateError('Unexpected API response structure',
+                             kind='invalid_response')
     if parsed.get('success') is False or parsed.get('error'):
-        raise CandidateError('Provider reported an error')
+        raise CandidateError('Provider reported an error', kind='invalid_response')
     return parsed
 
 
@@ -131,7 +125,10 @@ def valid_zero(price: Any) -> bool:
 @dataclass(frozen=True)
 class Candidate:
     provider: str
-    model: str
+    model: str  # exact API model ID; never use a display name in a request
+    display_name: str | None = None
+    quota_group: str | None = None  # same group => assume shared rate quota
+    context_window: int | None = None  # optional user-confirmed token capacity
 
 
 class Router:
@@ -208,13 +205,15 @@ class Router:
         return [Candidate(candidate.provider, model) for model in eligible
                 if (candidate.provider, model) not in used][:limit]
 
-    def generate(self, candidate: Candidate, prompt: str, *, probe: bool = False) -> str:
+    def generate(self, candidate: Candidate, prompt: str, *, probe: bool = False,
+                 request_timeout: float | None = None) -> str:
         """A probe is an actual short inference, not just a model lookup."""
         provider, model = candidate.provider, candidate.model
         key = os.getenv(KEY_NAMES[provider], '').strip()
         if not key:
             raise CandidateError('API key not configured')
-        timeout = self.probe_timeout if probe else self.timeout
+        timeout = request_timeout if request_timeout is not None else (
+            self.probe_timeout if probe else self.timeout)
         token_limit = 192 if probe else 750
         if probe:
             prompt = 'Hi. Reply with OK.'
@@ -353,12 +352,24 @@ def load_config(path: Path) -> list[Candidate]:
         raise ValueError('Config must have a priority list')
     result = []
     for row in doc['priority']:
-        if not isinstance(row, dict) or not isinstance(row.get('provider'), str) or not isinstance(row.get('model'), str):
-            raise ValueError('Each priority entry must provide provider and model strings')
-        if not row['provider'].strip() or not row['model'].strip():
-            raise ValueError('Empty provider or model name')
+        if not isinstance(row, dict) or not isinstance(row.get('provider'), str):
+            raise ValueError('Each priority entry must provide provider and model_id/model')
+        if not row['provider'].strip():
+            raise ValueError('Empty provider name')
+        model_id = row.get('model_id', row.get('model'))
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ValueError('Each priority entry requires a nonempty model_id/model')
+        window = row.get('context_window')
+        if window is not None and (not isinstance(window, int) or window <= 0):
+            raise ValueError('context_window must be a positive integer or omitted')
         if row.get('enabled', True):
-            result.append(Candidate(row['provider'], row['model']))
+            result.append(Candidate(
+                provider=row['provider'],
+                model=model_id,
+                display_name=row.get('display_name') or model_id,
+                quota_group=row.get('quota_group'),
+                context_window=window,
+            ))
     return result
 
 
@@ -370,6 +381,16 @@ def main(argv=None) -> int:
     p.add_argument('--show-rejected', action='store_true',
                    help='Show a short preview of rejected answers (only for non-sensitive prompts)')
     p.add_argument('--config', type=Path, default=ROOT / 'model_priority.json')
+    p.add_argument('--health-file', type=Path, default=ROOT / '.router_health.json')
+    p.add_argument('--health-ttl', type=int, default=600,
+                   help='Seconds a successfully checked model stays healthy (default 600)')
+    p.add_argument('--reset-health', action='store_true',
+                   help='Clear saved health/cooldowns, e.g. after changing API keys')
+    p.add_argument('--prompt-file', type=Path,
+                   help='Read the full unmodified question and conversation context from file')
+    p.add_argument('--role', help='Council role, e.g. prover or critic')
+    p.add_argument('--council-run', help='ID grouping the roles of a single council run')
+    p.add_argument('--council-file', type=Path, default=ROOT / '.council_roles.json')
     p.add_argument('--timeout', type=float, default=22.0, help='Read timeout per API call (seconds)')
     p.add_argument('--max-attempts', type=int, default=20)
     p.add_argument('--no-probe', action='store_true',
@@ -380,6 +401,17 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     if not (2 <= a.timeout <= 120) or not (1 <= a.probe_timeout <= 120) or not (1 <= a.max_attempts <= 100):
         p.error('--timeout must be 2-120, --probe-timeout 1-120 seconds, and --max-attempts 1-100')
+    if not (1 <= a.health_ttl <= 86400):
+        p.error('--health-ttl must be between 1 and 86400 seconds')
+    if bool(a.role) != bool(a.council_run):
+        p.error('--role and --council-run must be used together')
+    from router_health import HealthCache
+    from router_policy import ask_cached, record_council_role
+    if a.reset_health:
+        a.health_file.unlink(missing_ok=True)
+        print('Cleared cached health/cooldown state.')
+        if not a.prompt and not a.named_prompt and not a.prompt_file:
+            return 0
     try:
         candidates = load_config(a.config)
     except (OSError, ValueError, json.JSONDecodeError) as e:
@@ -388,22 +420,41 @@ def main(argv=None) -> int:
     if a.list:
         for i, c in enumerate(candidates, 1):
             status = 'configured' if os.getenv(KEY_NAMES.get(c.provider, ''), '') else 'no key'
-            print(f'{i:>2}. {c.provider:<14} {c.model:<43} {status}')
+            label = (c.display_name or c.model)
+            print(f'{i:>2}. {c.provider:<14} {label:<28} [{c.model}] {status}')
         return 0
-    prompt = a.named_prompt or a.prompt
-    if not prompt and not sys.stdin.isatty():
-        prompt = sys.stdin.read()
+    if a.prompt_file and (a.named_prompt is not None or a.prompt is not None):
+        p.error('Use either --prompt-file or a prompt argument, not both')
+    if a.prompt_file:
+        try:
+            prompt = a.prompt_file.read_text(encoding='utf-8')
+        except OSError as error:
+            p.error(f'Cannot read prompt file: {type(error).__name__}')
+    else:
+        prompt = a.named_prompt if a.named_prompt is not None else a.prompt
+        if prompt is None and not sys.stdin.isatty():
+            prompt = sys.stdin.read()
     if not prompt or not prompt.strip():
-        p.error('Give a question, use --prompt, or pipe a prompt via stdin')
+        p.error('Give a question, use --prompt-file, or pipe a prompt via stdin')
     try:
-        response, winning, attempts = Router(a.timeout, a.probe_timeout).ask(
-            prompt.strip() + ('\n\nFor this test, output only the final answer; no explanation.' if a.expect is not None else ''),
-            candidates, expected=a.expect, max_attempts=a.max_attempts,
+        response, winning, attempts = ask_cached(
+            Router(a.timeout, a.probe_timeout), prompt, candidates,
+            cache=HealthCache(a.health_file, ttl_seconds=a.health_ttl),
+            expected=a.expect, max_attempts=a.max_attempts,
             show_rejected=a.show_rejected, probe=not a.no_probe)
     except CandidateError as e:
         print(f'FAILED: {redacted(e)}', file=sys.stderr)
         return 1
     print(f'\nSelected: {winning.provider} / {winning.model}\n\n{response}')
+    if a.role and a.council_run:
+        # Count failed attempts to flag when this role needed a fallback.
+        role_alerts = record_council_role(
+            a.council_file, a.council_run, a.role, winning,
+            fallback_used=len(attempts) > 1
+        )
+        print(f'\nCouncil attribution: {a.role} -> {winning.provider}/{winning.model}')
+        for alert in role_alerts:
+            print(alert, file=sys.stderr)
     return 0
 
 
