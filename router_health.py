@@ -30,7 +30,8 @@ class HealthCache:
         self.path = Path(path)
         self.ttl = ttl_seconds
         self.clock = clock or time.time
-        self.data = {"version": 1, "models": {}, "providers": {}, "groups": {}}
+        self.data = {"version": 1, "models": {}, "providers": {}, "groups": {},
+                     "preferred": None}
         if self.path.exists():
             try:
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -39,6 +40,9 @@ class HealthCache:
                         value = loaded.get(key)
                         if isinstance(value, dict):
                             self.data[key] = value
+                    preferred = loaded.get("preferred")
+                    if isinstance(preferred, dict):
+                        self.data["preferred"] = preferred
             except (ValueError, OSError, UnicodeError):
                 # A corrupt/inaccessible state file must never expose secrets or
                 # prevent normal calls: fail open and rebuild it on next save.
@@ -84,7 +88,22 @@ class HealthCache:
         entry = self.data["models"].get(self.model_key(provider, model), {})
         return self._until(entry.get("healthy_until", 0)) > self.clock() if isinstance(entry, dict) else False
 
-    def success(self, provider: str, model: str):
+    def preferred_model(self) -> tuple[str, str] | None:
+        """Temporarily prefer the last successful real-answer model."""
+        entry = self.data.get("preferred")
+        if not isinstance(entry, dict):
+            return None
+        provider, model = entry.get("provider"), entry.get("model")
+        if not isinstance(provider, str) or not isinstance(model, str):
+            return None
+        if self._until(entry.get("until")) <= self.clock():
+            return None
+        if not self.healthy(provider, model, entry.get("quota_group")):
+            return None
+        return provider, model
+
+    def success(self, provider: str, model: str, *, prefer: bool = False,
+                quota_group: str | None = None):
         key = self.model_key(provider, model)
         self.data["models"][key] = {
             "healthy_until": self.clock() + self.ttl,
@@ -92,6 +111,13 @@ class HealthCache:
             "cooldown_until": 0,
             "reason": "",
         }
+        if prefer:
+            self.data["preferred"] = {
+                "provider": provider,
+                "model": model,
+                "quota_group": quota_group,
+                "until": self.clock() + self.ttl,
+            }
         self.save()
 
     def failure(self, provider: str, model: str, kind: str,
@@ -100,6 +126,10 @@ class HealthCache:
             # Context constraints are specific to this prompt, not model health.
             return
         now = self.clock()
+        preferred = self.data.get("preferred")
+        if (isinstance(preferred, dict) and preferred.get("provider") == provider
+                and preferred.get("model") == model):
+            self.data["preferred"] = None
         delay = COOLDOWN_SECONDS.get(kind, COOLDOWN_SECONDS["other"])
         if kind == "rate_limit" and retry_after is not None:
             delay = max(1, min(86400, float(retry_after)))
