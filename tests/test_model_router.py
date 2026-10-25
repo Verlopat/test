@@ -289,8 +289,8 @@ class RouterTests(unittest.TestCase):
     def test_provider_order_defaults_to_gemini_then_llm7(self):
         names = [c.provider for c in mr.load_config(
             Path(__file__).resolve().parents[1] / 'model_priority.json')]
-        self.assertEqual(names[:3], ['Gemini'] * 3)
-        self.assertEqual(names[3:7], ['LLM7.io'] * 4)
+        self.assertEqual(names[:4], ['Gemini'] * 4)
+        self.assertEqual(names[4:8], ['LLM7.io'] * 4)
         self.assertNotIn('Mistral', names)
 
     def test_no_probe_option_preserves_single_request(self):
