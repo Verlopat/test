@@ -1,5 +1,5 @@
 {
-  "note": "Exact API model IDs are in model_id (display_name is never sent to an API). Try Gemini main/backups, LLM7 main/backups, then remaining providers. Quota is assumed provider-shared unless an explicit quota_group is configured. Model context_window values below originate from the LLM7 catalog; other provider windows are left unspecified. Free/non-billed quota access must be confirmed separately.",
+  "note": "Provider-first model fallback: Gemini → LLM7.io → Groq → OpenRouter → Ollama Cloud → Cloudflare → Z.ai → Cohere → optional NVIDIA NIM. Exact API IDs in model_id; display_name is not sent. Cohere Trial keys only (Production keys are paid). Rate-limit quotas are assumed shared within each provider. Free/non-billed account use must be verified.",
   "priority": [
     {
       "provider": "Gemini",
@@ -69,6 +69,30 @@
       "provider": "Z.ai",
       "model_id": "glm-4.7-flash",
       "display_name": "Z.ai GLM-4.7 Flash"
+    },
+    {
+      "provider": "Cohere",
+      "model_id": "command-a-plus-05-2026",
+      "display_name": "Cohere Command A+ (2026)",
+      "context_window": 128000
+    },
+    {
+      "provider": "Cohere",
+      "model_id": "command-a-03-2025",
+      "display_name": "Cohere Command A",
+      "context_window": 256000
+    },
+    {
+      "provider": "Cohere",
+      "model_id": "command-r-plus-08-2024",
+      "display_name": "Cohere Command R+",
+      "context_window": 128000
+    },
+    {
+      "provider": "Cohere",
+      "model_id": "command-r7b-12-2024",
+      "display_name": "Cohere Command R7B",
+      "context_window": 128000
     },
     {
       "provider": "NVIDIA NIM",
