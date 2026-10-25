@@ -6,3 +6,7 @@ venv/
 __pycache__/
 *.py[cod]
 api_test_results*.csv
+.router_health.json
+.council_roles.json
+.router_health.json.*
+.council_roles.json.*
