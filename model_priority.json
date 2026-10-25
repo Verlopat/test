@@ -1,57 +1,79 @@
 {
-  "note": "Sequential provider-first ranking: Gemini (main + backups), LLM7 (main + backups), then other previously working providers. A Hi probe precedes each full inference by default. This is an editable preference ranking, not an objective quality benchmark. Use only free/non-billed API allowances.",
+  "note": "Exact API model IDs are in model_id (display_name is never sent to an API). Try Gemini main/backups, LLM7 main/backups, then remaining providers. Quota is assumed provider-shared unless an explicit quota_group is configured. Model context_window values below originate from the LLM7 catalog; other provider windows are left unspecified. Free/non-billed quota access must be confirmed separately.",
   "priority": [
     {
       "provider": "Gemini",
-      "model": "gemini-3.8-flash"
+      "model_id": "gemini-3.8-flash",
+      "display_name": "Gemini 3.8 Flash"
     },
     {
       "provider": "Gemini",
-      "model": "gemini-3.6-flash"
+      "model_id": "gemini-3.7-flash",
+      "display_name": "Gemini 3.7 Flash"
     },
     {
       "provider": "Gemini",
-      "model": "gemini-3.5-flash-lite"
+      "model_id": "gemini-3.6-flash",
+      "display_name": "Gemini 3.6 Flash"
+    },
+    {
+      "provider": "Gemini",
+      "model_id": "gemini-3.5-flash-lite",
+      "display_name": "Gemini 3.5 Flash-Lite"
     },
     {
       "provider": "LLM7.io",
-      "model": "minimax-m2.7"
+      "model_id": "minimax-m2.7",
+      "display_name": "MiniMax M2.7",
+      "context_window": 180000
     },
     {
       "provider": "LLM7.io",
-      "model": "nemotron-3-nano:30b"
+      "model_id": "nemotron-3-nano:30b",
+      "display_name": "Nemotron 3 Nano 30B",
+      "context_window": 1000000
     },
     {
       "provider": "LLM7.io",
-      "model": "gpt-oss:20b"
+      "model_id": "gpt-oss:20b",
+      "display_name": "GPT-OSS 20B",
+      "context_window": 128000
     },
     {
       "provider": "LLM7.io",
-      "model": "codestral-latest"
+      "model_id": "codestral-latest",
+      "display_name": "Codestral",
+      "context_window": 32000
     },
     {
       "provider": "Groq",
-      "model": "openai/gpt-oss-120b"
+      "model_id": "openai/gpt-oss-120b",
+      "display_name": "Groq GPT-OSS 120B"
     },
     {
       "provider": "OpenRouter",
-      "model": "nvidia/nemotron-3-ultra-550b-a55b:free"
+      "model_id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "display_name": "OpenRouter Nemotron 3 Ultra"
     },
     {
       "provider": "Ollama Cloud",
-      "model": "gemma4:31b"
+      "model_id": "gemma4:31b",
+      "display_name": "Ollama Gemma 4 31B"
     },
     {
       "provider": "Cloudflare",
-      "model": "@cf/zai-org/glm-4.7-flash"
+      "model_id": "@cf/zai-org/glm-4.7-flash",
+      "display_name": "Cloudflare GLM-4.7 Flash"
     },
     {
       "provider": "Z.ai",
-      "model": "glm-4.7-flash"
+      "model_id": "glm-4.7-flash",
+      "display_name": "Z.ai GLM-4.7 Flash"
     },
     {
       "provider": "NVIDIA NIM",
-      "model": "nvidia/nemotron-3-super-120b-a12b"
+      "model_id": "nvidia/nemotron-3-super-120b-a12b",
+      "display_name": "NVIDIA Nemotron 3 Super"
     }
   ]
 }
