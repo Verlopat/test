@@ -455,7 +455,10 @@ def main(argv=None) -> int:
         # Count failed attempts to flag when this role needed a fallback.
         role_alerts = record_council_role(
             a.council_file, a.council_run, a.role, winning,
-            fallback_used=len(attempts) > 1
+            fallback_used=bool(candidates) and (
+                (winning.provider, winning.model) !=
+                (candidates[0].provider, candidates[0].model)
+            )
         )
         print(f'\nCouncil attribution: {a.role} -> {winning.provider}/{winning.model}')
         for alert in role_alerts:
