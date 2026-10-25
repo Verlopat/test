@@ -178,5 +178,139 @@ class RouterTests(unittest.TestCase):
 
 
 
+    def test_probe_fail_then_gemini_backup_before_other_provider(self):
+        candidates = [
+            mr.Candidate('Gemini', 'gemini-3.8-flash'),
+            mr.Candidate('Gemini', 'gemini-3.6-flash'),
+            mr.Candidate('Groq', 'openai/gpt-oss-120b'),
+        ]
+        calls = []
+
+        def fake_api(method, url, **kwargs):
+            if method == 'GET':
+                return {'name': 'models/found'}
+            prompt = kwargs['payload']['contents'][0]['parts'][0]['text']
+            calls.append((url, prompt))
+            if 'gemini-3.8-flash' in url:
+                raise mr.CandidateError('HTTP 503: provider overloaded')
+            answer = 'OK' if prompt.startswith('Hi.') else '156'
+            return {'candidates': [{'content': {'parts': [{'text': answer}]},
+                                    'finishReason': 'STOP'}]}
+
+        with patch.dict(os.environ, {'GEMINI_API_KEY': 'test', 'GROQ_API_KEY': 'test'}), \
+             patch.object(mr, 'api_call', side_effect=fake_api):
+            answer, winner, attempts = self.router.ask(
+                'What is 12 times 13?', candidates, expected='156',
+                probe=True, log=self.notes.append)
+        self.assertEqual(answer, '156')
+        self.assertEqual(winner, candidates[1])
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all('gemini' in url for url, _ in calls))
+        self.assertEqual([prompt for _, prompt in calls],
+                         ['Hi. Reply with OK.', 'Hi. Reply with OK.', 'What is 12 times 13?'])
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(any('PROBE FAIL Gemini/gemini-3.8-flash' in x for x in self.notes))
+        self.assertTrue(any('PROBE OK Gemini/gemini-3.6-flash' in x for x in self.notes))
+        self.assertTrue(any('QUERY PASS Gemini/gemini-3.6-flash' in x for x in self.notes))
+
+    def test_probe_ok_real_query_fails_then_backup(self):
+        candidates = [mr.Candidate('Gemini', 'gemini-3.8-flash'),
+                      mr.Candidate('Gemini', 'gemini-3.6-flash')]
+        calls = []
+
+        def fake_api(method, url, **kwargs):
+            if method == 'GET':
+                return {'name': 'models/found'}
+            prompt = kwargs['payload']['contents'][0]['parts'][0]['text']
+            calls.append((url, prompt, kwargs['timeout'],
+                          kwargs['payload']['generationConfig']['maxOutputTokens']))
+            if 'gemini-3.8-flash' in url and not prompt.startswith('Hi.'):
+                raise mr.CandidateError('HTTP 429: rate limit or quota exceeded')
+            answer = 'OK' if prompt.startswith('Hi.') else '156'
+            return {'candidates': [{'content': {'parts': [{'text': answer}]},
+                                    'finishReason': 'STOP'}]}
+
+        with patch.dict(os.environ, {'GEMINI_API_KEY': 'test'}), \
+             patch.object(mr, 'api_call', side_effect=fake_api):
+            answer, winner, attempts = self.router.ask(
+                'real question', candidates, expected='156',
+                probe=True, log=self.notes.append)
+        self.assertEqual(answer, '156')
+        self.assertEqual(winner.model, 'gemini-3.6-flash')
+        self.assertEqual(len(calls), 4)
+        self.assertEqual([x[2] for x in calls], [8.0, 2, 8.0, 2])
+        self.assertEqual([x[3] for x in calls], [192, 700, 192, 700])
+        self.assertTrue(any(x.startswith('QUERY FAIL Gemini/gemini-3.8-flash') for x in self.notes))
+
+    def test_all_gemini_fail_then_llm7_main_fails_then_llm7_backup(self):
+        candidates = [
+            mr.Candidate('Gemini', 'gemini-3.8-flash'),
+            mr.Candidate('Gemini', 'gemini-3.6-flash'),
+            mr.Candidate('LLM7.io', 'minimax-m2.7'),
+            mr.Candidate('LLM7.io', 'codestral-latest'),
+            mr.Candidate('Groq', 'last'),
+        ]
+        calls = []
+
+        def fake_api(method, url, **kwargs):
+            if method == 'GET' and 'gemini' in url:
+                return {'name': 'models/ok'}
+            if method == 'GET' and 'llm7' in url:
+                return {'data': [{'id': x, 'tier': 'turbo', 'model_type': 'chat',
+                                  'usage_based_only': False}
+                                 for x in ('minimax-m2.7', 'codestral-latest')]}
+            if 'gemini' in url:
+                raise mr.CandidateError('provider overloaded')
+            model = kwargs['payload']['model']
+            prompt = kwargs['payload']['messages'][0]['content']
+            calls.append((model, prompt))
+            if model == 'minimax-m2.7':
+                raise mr.CandidateError('rate limit')
+            return {'choices': [{'message': {'content': 'OK' if prompt.startswith('Hi.') else '156'},
+                                 'finish_reason': 'stop'}]}
+
+        with patch.dict(os.environ, {'GEMINI_API_KEY': 'test', 'LLM7_API_KEY': 'test',
+                                     'GROQ_API_KEY': 'test'}), \
+             patch.object(mr, 'api_call', side_effect=fake_api), \
+             patch.object(self.router, '_pace_llm7'):
+            answer, winner, attempts = self.router.ask(
+                '12 * 13?', candidates, expected='156',
+                probe=True, log=self.notes.append)
+        self.assertEqual(answer, '156')
+        self.assertEqual(winner, mr.Candidate('LLM7.io', 'codestral-latest'))
+        self.assertEqual([model for model, _ in calls],
+                         ['minimax-m2.7', 'codestral-latest', 'codestral-latest'])
+        self.assertEqual(len(attempts), 4)
+        self.assertEqual(self.notes[-1].split()[0:2], ['QUERY', 'PASS'])
+
+    def test_provider_order_defaults_to_gemini_then_llm7(self):
+        names = [c.provider for c in mr.load_config(
+            Path(__file__).resolve().parents[1] / 'model_priority.json')]
+        self.assertEqual(names[:3], ['Gemini'] * 3)
+        self.assertEqual(names[3:7], ['LLM7.io'] * 4)
+        self.assertNotIn('Mistral', names)
+
+    def test_no_probe_option_preserves_single_request(self):
+        candidates = [mr.Candidate('Groq', 'openai/gpt-oss-120b')]
+        response = Response({'choices': [{'message': {'content': '156'},
+                                          'finish_reason': 'stop'}]})
+        with patch.dict(os.environ, {'GROQ_API_KEY': 'test'}), \
+             patch.object(mr.requests, 'request', return_value=response) as mock_request:
+            answer, winner, _ = self.router.ask('12*13', candidates,
+                                                expected='156', probe=False, log=self.notes.append)
+        self.assertEqual(answer, '156')
+        self.assertEqual(mock_request.call_count, 1)
+
+    def test_llm7_pacing_between_catalog_and_probe(self):
+        with patch.object(mr.time, 'monotonic', side_effect=[100.0, 100.2, 101.4]), \
+             patch.object(mr.time, 'sleep') as sleeper:
+            router = mr.Router()
+            router._pace_llm7()
+            router._pace_llm7()
+        sleeper.assert_called_once()
+        self.assertAlmostEqual(sleeper.call_args[0][0], 0.9, places=4)
+
+
+
 if __name__ == '__main__':
     unittest.main()
