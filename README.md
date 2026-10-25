@@ -21,11 +21,13 @@ On first setup only, copy `.env.example` to .env, fill in your API keys locally,
 1. **First contact:** call the top model with a small `Hi. Reply with OK.` inference probe.
 2. **If it responds:** send the **original, unchanged** question to the same model.
 3. **If it succeeds:** mark that exact provider/model healthy in a private local file for **10 minutes** (`600` seconds).
-4. **Further questions:** use the cached healthy model **without another Hi call** while the cache is valid.
+4. **Further questions:** send the real question **directly to the last successful model** (the temporary preferred winner) while its 10-minute health cache is valid; no repeat Hi calls.
 5. **If either the probe or real request fails:** classify the error, apply a cooldown when appropriate, and try the next eligible model **within the same provider**, then move to the next provider.
-6. **After 10 minutes:** probe again at the model's next use; a cooled-down model is not retried until its cooldown expires.
+6. **After 10 minutes:** the temporary preference expires, and the router starts from the original Gemini → LLM7 → remaining-provider ranking again. A cooled-down model is not retried until its cooldown expires.
 
 A successful Hi check is **not a guarantee** the real question will work. Even cached models always retain fallback handling for the actual request.
+
+The last successful model is preferred only during its health TTL. Use `--no-sticky` to always start with your original provider ranking (while still reusing per-model healthy status).
 
 The cache survives separate terminal executions as `.router_health.json` (private `0600` permissions). It stores **only provider/model IDs, health timestamps, cooldown timestamps and failure categories**—not API keys, requests or model outputs. .gitignore excludes it.
 
@@ -65,6 +67,9 @@ python model_router.py --health-ttl 600 --probe-timeout 8 --timeout 22 "Explain 
 
 # Disable probes entirely (real questions still populate the health cache)
 python model_router.py --no-probe "What is a lattice trapdoor?"
+
+# Always follow the original Gemini-first order instead of last-winner preference
+python model_router.py --no-sticky "Explain a commitment scheme"
 
 # Clear saved health and cooldowns, especially after replacing a bad API key
 python model_router.py --reset-health
