@@ -397,6 +397,8 @@ def main(argv=None) -> int:
     p.add_argument('--max-attempts', type=int, default=20)
     p.add_argument('--no-probe', action='store_true',
                    help='Skip lightweight Hi inference before each real question')
+    p.add_argument('--no-sticky', action='store_true',
+                   help='Use the original priority order, even if a healthy winner is cached')
     p.add_argument('--probe-timeout', type=float, default=8.0,
                    help='Read timeout for each lightweight probe (seconds)')
     p.add_argument('--list', action='store_true', help='Show configured ranking without sending requests')
@@ -443,7 +445,8 @@ def main(argv=None) -> int:
             Router(a.timeout, a.probe_timeout), prompt, candidates,
             cache=HealthCache(a.health_file, ttl_seconds=a.health_ttl),
             expected=a.expect, max_attempts=a.max_attempts,
-            show_rejected=a.show_rejected, probe=not a.no_probe)
+            show_rejected=a.show_rejected, probe=not a.no_probe,
+            sticky=not a.no_sticky)
     except CandidateError as e:
         print(f'FAILED: {redacted(e)}', file=sys.stderr)
         return 1
