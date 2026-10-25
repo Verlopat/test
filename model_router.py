@@ -30,7 +30,7 @@ load_dotenv(ROOT / '.env', override=True)
 SECRETS = tuple(os.getenv(name, '').strip() for name in (
     'GEMINI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY', 'CLOUDFLARE_API_TOKEN',
     'CLOUDFLARE_ACCOUNT_ID', 'ZAI_API_KEY', 'LLM7_API_KEY', 'OLLAMA_API_KEY',
-    'NVIDIA_API_KEY') if os.getenv(name, '').strip())
+    'NVIDIA_API_KEY', 'COHERE_API_KEY') if os.getenv(name, '').strip())
 
 KEY_NAMES = {
     'Gemini': 'GEMINI_API_KEY',
@@ -41,6 +41,7 @@ KEY_NAMES = {
     'LLM7.io': 'LLM7_API_KEY',
     'Ollama Cloud': 'OLLAMA_API_KEY',
     'NVIDIA NIM': 'NVIDIA_API_KEY',
+    'Cohere': 'COHERE_API_KEY',
 }
 
 
@@ -240,6 +241,33 @@ class Router:
             parts = (entry.get('content') or {}).get('parts', [])
             raw = '\n'.join(p['text'] for p in parts
                             if isinstance(p, dict) and isinstance(p.get('text'), str))
+        elif provider == 'Cohere':
+            # Cohere Chat v2 has its own response shape, distinct from OpenAI.
+            # https://docs.cohere.com/reference/chat
+            result = api_call('POST', 'https://api.cohere.com/v2/chat',
+                              key=key,
+                              payload={
+                                  'model': model,
+                                  'messages': [{'role': 'user', 'content': prompt}],
+                                  'max_tokens': token_limit,
+                                  'stream': False,
+                              },
+                              timeout=timeout)
+            finish_reason = str(result.get('finish_reason') or '').upper()
+            if finish_reason in ('MAX_TOKENS', 'ERROR', 'TIMEOUT', 'TOOL_CALL'):
+                raise CandidateError(f'Cohere generation did not finish: {finish_reason}',
+                                     kind='invalid_response')
+            message = result.get('message') or {}
+            if not isinstance(message, dict):
+                raise CandidateError('Malformed Cohere message', kind='invalid_response')
+            chunks = message.get('content') or []
+            if not isinstance(chunks, list):
+                raise CandidateError('Malformed Cohere content', kind='invalid_response')
+            raw = '\n'.join(
+                block['text'] for block in chunks
+                if isinstance(block, dict) and block.get('type') == 'text'
+                and isinstance(block.get('text'), str)
+            )
         elif provider == 'Cloudflare':
             account = os.getenv('CLOUDFLARE_ACCOUNT_ID', '').strip()
             if not account:
