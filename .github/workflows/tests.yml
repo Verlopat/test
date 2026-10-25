@@ -21,4 +21,4 @@ jobs:
       - name: Run offline tests
         run: python -m unittest discover -s tests -v
       - name: Syntax check
-        run: python -m py_compile model_router.py answer_validation.py verify_free_apis_v2.py
+        run: python -m py_compile model_router.py answer_validation.py router_errors.py router_health.py router_policy.py verify_free_apis_v2.py
