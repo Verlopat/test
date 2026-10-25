@@ -59,7 +59,8 @@ def _model_capacity_problem(candidate, prompt: str) -> bool:
 
 def ask_cached(router, prompt: str, ordered, *, cache: HealthCache,
                expected: str | None = None, max_attempts: int = 20,
-               log=None, probe: bool = True, show_rejected: bool = False):
+               log=None, probe: bool = True, show_rejected: bool = False,
+               sticky: bool = True):
     """Return (answer, actual_candidate, attempts).
 
     max_attempts counts models (not lightweight probes or retries). A cooldown
@@ -71,6 +72,20 @@ def ask_cached(router, prompt: str, ordered, *, cache: HealthCache,
         log = print
     used = set()
     attempted = []
+    # While a real-answer winner stays healthy, reuse it directly instead
+    # of restarting at a previously failing higher-priority provider.
+    # Once the preference expires, restore the original configured order.
+    if sticky:
+        preferred = cache.preferred_model()
+        if preferred:
+            matched = next((item for item in ordered
+                            if (item.provider, item.model) == preferred), None)
+            if matched is not None:
+                ordered = [matched] + [
+                    item for item in ordered
+                    if (item.provider, item.model) != preferred
+                ]
+                log(f"PREFERRED CACHED {preferred[0]}/{preferred[1]}")
     for entry in ordered:
         provider = entry.provider
         model = entry.model
@@ -151,7 +166,8 @@ def ask_cached(router, prompt: str, ordered, *, cache: HealthCache,
                 attempted.append((candidate.provider, candidate.model, "invalid_response"))
                 log(f"QUERY FAIL {candidate.provider}/{candidate.model}: malformed response")
                 continue
-            cache.success(candidate.provider, candidate.model)
+            cache.success(candidate.provider, candidate.model,
+                          prefer=True, quota_group=quota)
             attempted.append((candidate.provider, candidate.model, "OK"))
             log(f"QUERY PASS {candidate.provider}/{candidate.model}")
             return answer, candidate, attempted
