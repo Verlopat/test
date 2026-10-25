@@ -25,7 +25,8 @@ load_dotenv(HERE / '.env', override=True)
 PROMPT = 'What is 12 multiplied by 13? Answer with only the number.'
 KEYS = ['GEMINI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY',
         'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID',
-        'ZAI_API_KEY', 'LLM7_API_KEY', 'OLLAMA_API_KEY']
+        'ZAI_API_KEY', 'LLM7_API_KEY', 'OLLAMA_API_KEY',
+        'NVIDIA_API_KEY', 'COHERE_API_KEY']
 SECRETS = [os.getenv(key, '').strip() for key in KEYS]
 
 
@@ -190,6 +191,26 @@ def llm7(args):
     return evaluate(model, raw)
 
 
+def cohere(args):
+    model = 'command-a-plus-05-2026'
+    data = fetch('POST', 'https://api.cohere.com/v2/chat',
+                 key=os.environ['COHERE_API_KEY'],
+                 payload={
+                     'model': model,
+                     'messages': [{'role': 'user', 'content': PROMPT}],
+                     'max_tokens': 300,
+                     'stream': False,
+                 }, timeout=(8, 45))
+    reason = str(data.get('finish_reason', '')).upper()
+    if reason in ('MAX_TOKENS', 'ERROR', 'TIMEOUT', 'TOOL_CALL'):
+        return 'RESPONSE WARNING', model, 'Incomplete Cohere generation: ' + reason
+    message = data.get('message') or {}
+    chunks = message.get('content') or [] if isinstance(message, dict) else []
+    answer = '\n'.join(x.get('text', '') for x in chunks
+                       if isinstance(x, dict) and x.get('type') == 'text').strip()
+    return evaluate(model, answer or '(empty answer)')
+
+
 def nvidia(args):
     model = 'nvidia/nemotron-3-super-120b-a12b'
     return evaluate(model, chat('https://integrate.api.nvidia.com/v1/chat/completions',
@@ -221,6 +242,7 @@ PROVIDERS = [
     ('Z.ai', ['ZAI_API_KEY'], zai),
     ('LLM7.io', ['LLM7_API_KEY'], llm7),
     ('Ollama Cloud', ['OLLAMA_API_KEY'], ollama),
+    ('Cohere', ['COHERE_API_KEY'], cohere),
     ('NVIDIA NIM', ['NVIDIA_API_KEY'], nvidia),
 ]
 
