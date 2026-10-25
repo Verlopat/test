@@ -51,8 +51,8 @@ def from_http(status_code: int, response_text: str = "",
               retry_after: str | None = None) -> CandidateError:
     """Inspect error category only; do not include raw remote text in log output."""
     body = response_text[:2400]
-    if status_code == 401:
-        return CandidateError("HTTP 401: invalid API credentials", kind="auth")
+    if status_code in (401, 498):
+        return CandidateError(f"HTTP {status_code}: invalid API credentials", kind="auth")
     if status_code == 403:
         return CandidateError("HTTP 403: API access denied", kind="auth")
     if status_code == 429:
