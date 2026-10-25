@@ -1,12 +1,12 @@
-# Free-tier API checks + automatic model fallback
+# Free API model router — cached health + provider-first fallback
 
-Local Python tools for **seven previously configured providers** (Gemini, Groq, OpenRouter, Cloudflare, Z.ai, LLM7.io and Ollama Cloud) plus **optional NVIDIA NIM**. Mistral has been excluded because this account's API inference requires an upgrade.
+Local Python router that tries **Gemini main + backups → LLM7 main + backups → Groq → OpenRouter → Ollama Cloud → Cloudflare → Z.ai → optional NVIDIA NIM**. It is not a full multi-model research council or website.
 
-No LLM Council or website has been built. **Mistral is not used in either the default verifier or the new router.**
+The default configuration has **exact API model IDs** in `model_priority.json` alongside human-readable `display_name` fields. A display name is **never** sent to the API. Mistral's own provider API is excluded (it requires a plan upgrade in this account). LLM7 may host a Codestral model independently.
 
-## Install
+## Install / update (Arch Linux or other Linux)
 
-From your existing Git checkout:
+From your existing repository directory:
 
 ```bash
 git pull --ff-only
@@ -14,109 +14,125 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-On first setup, copy `.env.example` to .env, enter your keys **locally**, then `chmod 600 .env`. Never commit or paste your keys.
+On first setup only, copy `.env.example` to .env, fill in your API keys locally, and run `chmod 600 .env`. Do not share or commit your real keys. Existing local .env is not overwritten by `git pull`.
 
-## Provider-first handshake and fallback
+## How the new selection works
 
-This is now a **two-step inference process per candidate**, enabled by default:
+1. **First contact:** call the top model with a small `Hi. Reply with OK.` inference probe.
+2. **If it responds:** send the **original, unchanged** question to the same model.
+3. **If it succeeds:** mark that exact provider/model healthy in a private local file for **10 minutes** (`600` seconds).
+4. **Further questions:** use the cached healthy model **without another Hi call** while the cache is valid.
+5. **If either the probe or real request fails:** classify the error, apply a cooldown when appropriate, and try the next eligible model **within the same provider**, then move to the next provider.
+6. **After 10 minutes:** probe again at the model's next use; a cooled-down model is not retried until its cooldown expires.
 
-1. Send a short `Hi. Reply with OK.` prompt to Gemini 3.8 Flash.
-2. If the probe fails, try Gemini 3.6 Flash, then Gemini 3.5 Flash-Lite.
-3. If a probe succeeds, send the **real prompt** to that same model.
-4. If the real prompt fails, still move to the next model.
-5. After Gemini's candidates, try LLM7's MiniMax-M2.7, Nemotron Nano 30B, GPT-OSS 20B, and Codestral.
-6. Only after those move to Groq, OpenRouter, Ollama Cloud, Cloudflare, Z.ai and optional NVIDIA NIM.
+A successful Hi check is **not a guarantee** the real question will work. Even cached models always retain fallback handling for the actual request.
 
-The order is in `model_priority.json`; these are preferences, not a proven quality ranking. Each LLM7 candidate must still appear as an eligible **Turbo** model in the live catalog. Mistral's **own provider API** remains excluded; Codestral via the independent LLM7 service is a different endpoint.
+The cache survives separate terminal executions as `.router_health.json` (private `0600` permissions). It stores **only provider/model IDs, health timestamps, cooldown timestamps and failure categories**—not API keys, requests or model outputs. .gitignore excludes it.
 
-**A successful Hi response does not guarantee the real prompt will succeed.** The probe is an actual paid-or-free-allowance inference request, **not** a permanent connection or authorization reservation. Every model attempted may consume two inference requests, and the router sends the real question only after its probe succeeds. Free quotas and limits are enforced by the providers; the router does not guarantee free billing.
+### Failure behavior
 
-The LLM7 connector spaces requests to respect the documented roughly one-request-per-second free-tier rate limit. If probes are consuming too much quota or slowing down the workflow, use `--no-probe`. The router still performs fallback for failed real queries without probes.
+| Condition | Action |
+| --- | --- |
+| Invalid credentials (401/403) | Skip remaining models of this provider; provider cooldown |
+| Model missing/unavailable (404, matching 400) | Cool down only that model; try backup |
+| 429 rate limit | Honor provider `Retry-After` if provided; cool down the quota group and try another eligible independent group or provider |
+| Timeout / 5xx / connection failure | One short retry, then model cooldown and fallback |
+| Context too long (400/413/422 matching context error) | Move to a model with enough known context; **do not** mark the first one unhealthy |
+| Malformed, empty, incomplete or known-wrong answer | Model cooldown and fallback |
+| Missing provider key | Skip that provider without making requests |
 
-## Run the ranked fallback router
+**Quota groups:** model entries can specify `quota_group`. Without an explicit group the router assumes the provider's quota is shared, to avoid hammering multiple models on one rate-limited account. Only assign a different group when you have verified the two models really have separate quotas. Long `Retry-After` delays are saved as cooldowns rather than making the router wait indefinitely.
+
+**Context size:** add optional `context_window` (tokens) only when verified for that exact model. The local pre-check is an approximate token estimate and cannot replace the provider's tokenizer. The LLM7 model windows in the default config come from its public catalog. Other context sizes remain unspecified; their API errors are handled if they arise.
+
+### Basic usage
 
 ```bash
-# Show the ranking and which providers have keys without making API calls
+# Show exact API IDs, display names and which keys are configured (no API calls)
 python model_router.py --list
 
-# Default: send a short Hi probe, then the real question to a responsive model
-python model_router.py "Explain what a zero-knowledge proof is"
+# On first use: probe, then send this exact question
+python model_router.py "Explain lattice-based VRFs"
 
-# Skip the extra Hi requests if you need fewer API calls
-python model_router.py --no-probe "Explain a zero-knowledge proof"
-
-# Test accuracy for a prompt with a known answer
+# Known-answer smoke test
 python model_router.py --expect 156 "What is 12 multiplied by 13?"
 
-# Avoid waiting long for an overloaded model
-python model_router.py --probe-timeout 7 --timeout 12 --max-attempts 8 "Explain Merkle trees"
+# Full conversation context stored in one text file, unmodified across attempts
+python model_router.py --prompt-file research_question.txt
+
+# Make health checks last 10 minutes (default), with explicit timeouts
+python model_router.py --health-ttl 600 --probe-timeout 8 --timeout 22 "Explain ZK folding schemes"
+
+# Disable probes entirely (real questions still populate the health cache)
+python model_router.py --no-probe "What is a lattice trapdoor?"
+
+# Clear saved health and cooldowns, especially after replacing a bad API key
+python model_router.py --reset-health
+
+# For harmless diagnostics only; do not use with private prompts
+python model_router.py --expect 156 --show-rejected "What is 12 multiplied by 13?"
 ```
 
-The **first eligible model with a usable response to the real question wins**, and later models are not called. Messages identify each `PROBE OK`, `PROBE FAIL`, `QUERY PASS` and `QUERY FAIL`. Failures including 401/403, 429, 5xx, timeouts, missing keys, nonexistent models, empty output, malformed thinking tags and truncated responses fall through to the next candidate. The program prints FAIL/SKIP/PASS events, the winning provider and its answer. If all configured options fail, it exits with an error rather than inventing an answer.
+**Known-answer validation:** `--expect` can recognize simple numerical answer formatting, but the router does not know whether a long research explanation is factually correct. It returns the first successfully completed response that passes structural checks, not necessarily the best answer.
 
-**Critical distinction:** Usable does not mean factually correct. The router cannot automatically prove answer quality for open-ended prompts. For exact-answer tests, `--expect` verifies the output and falls back if wrong.
+**Privacy:** each attempted provider receives the same real user question, including any conversation history supplied as text. Only models up to and including the winner receive it. Do not supply sensitive material to third-party providers unless you are comfortable with their policies.
 
-### Ranking and selecting fallback models
+### Ranking and model IDs
 
-Edit `model_priority.json`. Entries are attempted **top-to-bottom**:
+Edit `model_priority.json` to change the exact order:
 
 ```json
-{"priority": [
-  {"provider": "Gemini", "model": "gemini-3.8-flash"},
-  {"provider": "Gemini", "model": "gemini-3.5-flash-lite"},
-  {"provider": "Groq", "model": "openai/gpt-oss-120b"}
-]}
+{
+  "priority": [
+    {
+      "provider": "Gemini",
+      "model_id": "gemini-3.8-flash",
+      "display_name": "Gemini 3.8 Flash"
+    },
+    {
+      "provider": "Gemini",
+      "model_id": "gemini-3.7-flash",
+      "display_name": "Gemini 3.7 Flash"
+    },
+    {
+      "provider": "LLM7.io",
+      "model_id": "minimax-m2.7",
+      "display_name": "MiniMax M2.7",
+      "context_window": 180000
+    }
+  ]
+}
 ```
 
-If Gemini 3.8 Flash fails, try Gemini 3.5 Flash-Lite. If that fails, try Groq. Change the order whenever you want; there is **no scientifically verified universal model ranking**.
+`model_id` is the exact text sent to the provider. `display_name` is only for people. For explicit independent quota pools, set a supported `quota_group`; for cross-provider council comparison you may set a `model_family` indicating the common underlying model. The router also accepts older config files using `model` instead of `model_id`.
 
-The included ranking deliberately begins with Gemini 3.8/3.6/3.5 Flash-Lite, then LLM7 MiniMax and its backups, as requested. Consequently, the default run can be slower when Gemini is overloaded. `--probe-timeout` controls the time spent on Hi probes. `auto-free` under OpenRouter checks the live model catalog and tries up to three additional models with **both input and output listed at zero price**. `auto-turbo` for LLM7.io is available if added to the configuration, and checks its Turbo/non-usage-based catalog markers. These automated catalog orders are **not quality rankings**. Candidate IDs are attempted only once.
+Model ranking is **user-preference order**, not a benchmark-based proof of superiority. Live model IDs and availability can change.
 
-Some services offer a free quota but also paid plans. This code cannot inspect billing settings or guarantee charges cannot occur. **Confirm your own free/non-billed plan and quota** for every configured provider before making requests. A free API key is not automatically a free API inference plan.
+### Council role attribution (optional)
 
-The router makes no requests to providers that have no configured key. It does not share prompts with every provider; only those attempted until a valid answer is obtained. Avoid sending sensitive or private information to third-party APIs.
-
-## Adding NVIDIA NIM instead of Mistral
-
-NVIDIA's Developer Program offers free hosted **Free Endpoint** API access for prototyping (subject to eligibility and limits). Create a key via <https://build.nvidia.com/> and add this line to your existing local .env:
-
-```dotenv
-NVIDIA_API_KEY=your_private_key_here
-```
-
-The default configuration includes NVIDIA's `nvidia/nemotron-3-super-120b-a12b` hosted candidate. Its inference will be **skipped** until the key exists. Check in the NVIDIA model catalog that this candidate still has a Free Endpoint before testing. Other NVIDIA endpoints may be paid or unavailable.
-
-Test it alone:
+This does **not** create an LLM Council. It only records which model actually answered each named role. Keep one `--council-run` ID across that council session:
 
 ```bash
-python verify_free_apis_v2.py --provider "NVIDIA NIM"
+python model_router.py --council-run trial-001 --role proposer "Propose a theorem"
+python model_router.py --council-run trial-001 --role critic "Critique the theorem"
+python model_router.py --council-run trial-001 --role verifier "Evaluate the proof"
 ```
 
-For the other providers, run the original smoke test:
+The private `.council_roles.json` records **role → actual provider, exact model ID, underlying base model, whether fallback was needed, timestamp**. It stores no prompt text or answers. If multiple roles resolve to the same underlying base model (including through different API providers), the program prints a model-reuse warning, and a stronger independence warning when three or more roles share it. Thus a council never silently counts one base model as three independent model perspectives.
 
-```bash
-python verify_free_apis_v2.py
+## Costs and free-tier safeguards
 
-# Ollama inference is opt-in, after confirming Free plan
-python verify_free_apis_v2.py --provider "Ollama Cloud" --test-allowance
-```
+The router cannot verify billing configuration or guarantee an unlimited free allowance. Before running queries, confirm each provider account is on a free/non-billed plan and check current usage limits. An API key by itself does not mean inference is free.
 
-Mistral is no longer tested. Reports from the verifier go to `api_test_results_v2.csv` and the router does not persist prompts or responses.
+OpenRouter only uses explicit :free model IDs that its live catalog reports with zero input **and** output prices. LLM7 only uses eligible Turbo models with the provider's non-usage-based catalog flag. NVIDIA NIM is optional and skipped when `NVIDIA_API_KEY` is not configured; verify that a particular endpoint is available under the developer free quota before adding its key. Model IDs in the config do not authorize paid access by themselves.
 
-## Offline regression tests
+## Test
 
 ```bash
 python -m unittest discover -s tests -v
+python -m py_compile model_router.py router_policy.py router_health.py router_errors.py answer_validation.py
 ```
 
-Tests use mocked HTTP responses and do not call external providers. Live results still depend on account access, uptime and current catalog/prices.
+Offline tests use mocked HTTP and do not use any real API keys or inference credits. GitHub Actions runs them on pushes to `main`. A passing offline suite does **not** replace live provider testing.
 
-## Existing folder
-
-If already linked to this GitHub repo: `git pull --ff-only`. If the folder has no Git metadata, download the code archive directly into it:
-
-```bash
-curl -fL https://github.com/Verlopat/test/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1
-```
-
-Do not upload your .env or secrets. .gitignore prevents them from being tracked accidentally.
+See also `verify_free_apis_v2.py` for a basic per-provider smoke check.
