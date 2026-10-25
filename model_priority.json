@@ -1,5 +1,5 @@
 {
-  "note": "Provider-first model fallback: Gemini → LLM7.io → Groq → OpenRouter → Ollama Cloud → Cloudflare → Z.ai → Cohere → optional NVIDIA NIM. Exact API IDs in model_id; display_name is not sent. Cohere Trial keys only (Production keys are paid). Rate-limit quotas are assumed shared within each provider. Free/non-billed account use must be verified.",
+  "note": "Provider-first model fallback: Gemini → LLM7.io → Groq → OpenRouter → Ollama Cloud → Cloudflare → Z.ai → Cohere. Exact API IDs in model_id; display_name is not sent. Cohere Trial keys only (Production keys are paid). Rate-limit quotas are assumed shared within each provider. Free/non-billed account use must be verified.",
   "priority": [
     {
       "provider": "Gemini",
@@ -93,11 +93,6 @@
       "model_id": "command-r7b-12-2024",
       "display_name": "Cohere Command R7B",
       "context_window": 128000
-    },
-    {
-      "provider": "NVIDIA NIM",
-      "model_id": "nvidia/nemotron-3-super-120b-a12b",
-      "display_name": "NVIDIA Nemotron 3 Super"
     }
   ]
 }
