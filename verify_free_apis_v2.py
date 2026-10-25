@@ -12,6 +12,7 @@ personally confirmed the relevant account is on its free, non-billed plan.
 import argparse
 import csv
 import os
+import re
 import time
 from pathlib import Path
 
@@ -81,7 +82,7 @@ def chat(url, key, model, *, timeout=(8, 45), tokens=300, extra=None):
         payload.update(extra)
     data = fetch('POST', url, key=key, payload=payload, timeout=timeout)
     answer = extract(data).strip()
-    return answer[:160] if answer else '(empty answer)'
+    return answer[:1200] if answer else '(empty answer)'
 
 
 def evaluate(model, answer, extra_note=''):
@@ -92,7 +93,7 @@ def evaluate(model, answer, extra_note=''):
 
 def gemini(args):
     key = os.environ['GEMINI_API_KEY']
-    model = 'gemini-3.8-flash'
+    model = os.getenv('GEMINI_MODEL', 'gemini-3.8-flash').strip()
     base = 'https://generativelanguage.googleapis.com/v1beta'
     headers = {'x-goog-api-key': key, 'Content-Type': 'application/json'}
     # An authenticated GET separates valid credentials from busy inference servers.
@@ -105,7 +106,7 @@ def gemini(args):
                      payload={'contents': [{'parts': [{'text': PROMPT}]}],
                               'generationConfig': {'maxOutputTokens': 256,
                                                    'thinkingConfig': {'thinkingLevel': 'LOW'}}},
-                     timeout=(8, 85))
+                     timeout=(8, 25))
     except RuntimeError as exc:
         return 'AUTHENTICATED; INFERENCE ERROR', model, str(exc)
     candidates = data.get('candidates', [])
@@ -179,7 +180,14 @@ def llm7(args):
         return 'CATALOG ONLY', '-', 'No eligible turbo models found'
     free.sort()
     model = 'minimax-m2.7' if 'minimax-m2.7' in free else free[0]
-    return evaluate(model, chat('https://api.llm7.io/v1/chat/completions', key, model))
+    raw = chat('https://api.llm7.io/v1/chat/completions', key, model)
+    # Some hosted models include reasoning inside the content field.
+    # Strip only complete <think> blocks, and keep a visible warning that
+    # the original output was not clean. Do not silently label it exact.
+    cleaned = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL | re.IGNORECASE).strip()
+    if cleaned == '156' and raw != cleaned:
+        return 'INFERENCE OK; FORMAT WARNING', model, '156 (reasoning text removed for display)'
+    return evaluate(model, raw)
 
 
 def ollama(args):
