@@ -129,6 +129,7 @@ class Candidate:
     display_name: str | None = None
     quota_group: str | None = None  # same group => assume shared rate quota
     context_window: int | None = None  # optional user-confirmed token capacity
+    model_family: str | None = None  # optional cross-provider base-model identity
 
 
 class Router:
@@ -369,6 +370,7 @@ def load_config(path: Path) -> list[Candidate]:
                 display_name=row.get('display_name') or model_id,
                 quota_group=row.get('quota_group'),
                 context_window=window,
+                model_family=row.get('model_family'),
             ))
     return result
 
